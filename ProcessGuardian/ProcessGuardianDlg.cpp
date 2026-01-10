@@ -8,11 +8,18 @@
 #include "ProcessGuardianDlg.h"
 #include "afxdialogex.h"
 #include <TlHelp32.h>
+#include <cstring>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #endif
+#include <string>
+#include "JSON/CJsonObject.hpp"
 
+// ProcessGuardianDlg.h
+
+#define MAIN_WINDOW_TITLE _T("ProcessGuardian_Window_Unique_2026")
+#define LOG_COPYDATA_ID 0x1234
 
 // 用于应用程序“关于”菜单项的 CAboutDlg 对话框
 
@@ -21,15 +28,15 @@ class CAboutDlg : public CDialog
 public:
 	CAboutDlg();
 
-// 对话框数据
+	// 对话框数据
 #ifdef AFX_DESIGN_TIME
 	enum { IDD = IDD_ABOUTBOX };
 #endif
 
-	protected:
+protected:
 	virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV 支持
 
-// 实现
+	// 实现
 protected:
 	DECLARE_MESSAGE_MAP()
 };
@@ -61,15 +68,20 @@ void CProcessGuardianDlg::DoDataExchange(CDataExchange* pDX)
 {
 	CDialog::DoDataExchange(pDX);
 	DDX_Control(pDX, IDC_PROC_COMBO, m_ComboProcess);
-	DDX_Control(pDX, IDC_LOG_EDIT, m_EditLog);
+	DDX_Control(pDX, IDC_LIST_LOG, m_ListLog);
+	DDX_Control(pDX, IDC_INJECT_BTN, m_ButtonInject);
+	DDX_Control(pDX, IDC_UNINJECT_BTN, m_ButtonUnInject);
+	DDX_Control(pDX, IDC_EDIT_LOG, m_EditLog);
 }
 
 BEGIN_MESSAGE_MAP(CProcessGuardianDlg, CDialog)
-	ON_MESSAGE(WM_USER + 1, &OnLogMessage)
+	ON_WM_COPYDATA()
 	ON_WM_SYSCOMMAND()
 	ON_WM_PAINT()
 	ON_WM_QUERYDRAGICON()
 	ON_BN_CLICKED(IDC_INJECT_BTN, &CProcessGuardianDlg::OnBnClickedInjectBtn)
+	ON_BN_CLICKED(IDC_UNINJECT_BTN, &CProcessGuardianDlg::OnBnClickedUninjectBtn)
+	ON_BN_CLICKED(IDC_REFRESH_PROCESS_BTN, &CProcessGuardianDlg::OnBnClickedRefreshProcessBtn)
 END_MESSAGE_MAP()
 
 
@@ -78,6 +90,11 @@ END_MESSAGE_MAP()
 BOOL CProcessGuardianDlg::OnInitDialog()
 {
 	CDialog::OnInitDialog();
+
+
+	// 立即设置唯一窗口标题（必须在 FindWindow 前）
+	SetWindowText(MAIN_WINDOW_TITLE); // 定义为宏或常量
+
 
 	// 将“关于...”菜单项添加到系统菜单中。
 
@@ -107,6 +124,20 @@ BOOL CProcessGuardianDlg::OnInitDialog()
 	// TODO: 在此添加额外的初始化代码
 
 
+
+	m_ListLog.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+
+	// 插入列（新增“序号”列）
+	m_ListLog.InsertColumn(0, _T("序号"), LVCFMT_RIGHT, 80);   // 新增
+	m_ListLog.InsertColumn(1, _T("类型"), LVCFMT_LEFT, 80);
+	m_ListLog.InsertColumn(2, _T("PID"), LVCFMT_RIGHT, 80);
+	m_ListLog.InsertColumn(3, _T("地址"), LVCFMT_LEFT, 120);
+	m_ListLog.InsertColumn(4, _T("请求大小"), LVCFMT_RIGHT, 120);
+	m_ListLog.InsertColumn(5, _T("实际大小"), LVCFMT_RIGHT, 120);
+	m_ListLog.InsertColumn(6, _T("状态"), LVCFMT_LEFT, 80);
+	m_ListLog.InsertColumn(7, _T("数据 (Hex)"), LVCFMT_LEFT, 500);
+
+
 	// 获取 DLL 路径（假设 hook.dll 在 exe 同目录）
 	TCHAR szPath[MAX_PATH];
 	GetModuleFileName(NULL, szPath, MAX_PATH);
@@ -114,12 +145,12 @@ BOOL CProcessGuardianDlg::OnInitDialog()
 	PathAppend(szPath, _T("HookDll.dll"));
 	m_strDllPath = szPath;
 
-	// 启动日志监听线程
-	m_hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-	m_pLogThread = AfxBeginThread(LogListenerProc, this);
-
 	// 填充进程列表
 	PopulateProcessList();
+
+	m_ButtonInject.EnableWindow(true);
+	m_ButtonUnInject.EnableWindow(false);
+
 
 	return TRUE;  // 除非将焦点设置到控件，否则返回 TRUE
 }
@@ -188,61 +219,59 @@ void CProcessGuardianDlg::PopulateProcessList()
 	CloseHandle(hSnap);
 }
 
-LRESULT CProcessGuardianDlg::OnLogMessage(WPARAM wParam, LPARAM lParam)
+void CProcessGuardianDlg::ParseAndAddLogToList(const CString& jsonStr)
 {
-	CString* pStr = (CString*)lParam;
-	m_EditLog.ReplaceSel(*pStr + "\r\n");
-	m_EditLog.LineScroll(m_EditLog.GetLineCount());
-	delete pStr; // 注意：我们在 PostMessage 时 new 了字符串
-	return 0;
-}
+	try {
+		std::string utf8 = CT2A(jsonStr, CP_UTF8);
+		neb::CJsonObject json;
 
-UINT CProcessGuardianDlg::LogListenerProc(LPVOID pParam)
-{
-	CProcessGuardianDlg* pThis = (CProcessGuardianDlg*)pParam;
+		if (!json.Parse(utf8))	return;
 
-	while (WaitForSingleObject(pThis->m_hStopEvent, 0) != WAIT_OBJECT_0) {
-		HANDLE hPipe = CreateNamedPipe(
-			_T("\\\\.\\pipe\\RWMHookPipe"),
-			PIPE_ACCESS_INBOUND,
-			PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-			1, 1024, 1024, 0, NULL
-		);
 
-		if (hPipe == INVALID_HANDLE_VALUE) {
-			Sleep(500);
-			continue;
-		}
+		//{"type":"READ","pid":27004,"address":"0x004A18CC","request_size":4,"actual_size":4,"success":true,"data":"F0 5D 14 96"}
+		
+		std::string type;
+		json.Get("type", type);
 
-		// 等待客户端连接
-		if (!ConnectNamedPipe(hPipe, NULL)) {
-			if (GetLastError() != ERROR_PIPE_CONNECTED) {
-				CloseHandle(hPipe);
-				Sleep(500);
-				continue;
-			}
-		}
+		int pid;
+		json.Get("pid", pid);
 
-		// 客户端已连接，持续读取直到断开
-		char buffer[1024];
-		DWORD bytesRead;
-		while (ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL)) {
-			if (bytesRead == 0) break; // 客户端正常关闭
 
-			buffer[bytesRead] = '\0';
-			CStringA msgA(buffer);
-			CString* pMsg = new CString(msgA);
-			pThis->PostMessage(WM_USER + 1, 0, (LPARAM)pMsg);
-		}
+		std::string address;
+		json.Get("address", address);
 
-		// 客户端断开（可能因进程退出、DLL 卸载等）
-		CloseHandle(hPipe);
-		// 自动进入下一轮循环，等待新连接
+		int request_size;
+		json.Get("request_size", request_size);
+
+		int actual_size;
+		json.Get("actual_size", actual_size);
+
+		bool success;
+		json.Get("success", success);
+
+
+		std::string data;
+		json.Get("data", data);
+
+	
+		auto status = success ? _T("成功") : _T("失败");
+		int idx = m_ListLog.GetItemCount();
+
+		// 设置第 0 列：序号
+		m_ListLog.InsertItem(idx, CString(std::to_string(idx).c_str()));
+		m_ListLog.SetItemText(idx, 1, CString(type.c_str()));
+		m_ListLog.SetItemText(idx, 2, CString(std::to_string(pid).c_str()));
+		m_ListLog.SetItemText(idx, 3, CString(address.c_str()));
+		m_ListLog.SetItemText(idx, 4, CString(std::to_string(request_size).c_str()));
+		m_ListLog.SetItemText(idx, 5, CString(std::to_string(actual_size).c_str()));
+		m_ListLog.SetItemText(idx, 6, status);
+		m_ListLog.SetItemText(idx, 7, CString(data.c_str()));
+		//m_ListLog.EnsureVisible(idx, FALSE);
 	}
-
-	return 0;
+	catch (const std::exception& e) {
+		OutputDebugStringA(("JSON parse error: " + std::string(e.what()) + "\n").c_str());
+	}
 }
-
 
 bool InjectDLL(DWORD pid, const CString& dllPath) {
 	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
@@ -273,5 +302,150 @@ void CProcessGuardianDlg::OnBnClickedInjectBtn()
 
 	auto pid = m_ComboProcess.GetItemData(idx);
 
-	InjectDLL(pid, m_strDllPath);
+	if (InjectDLL(pid, m_strDllPath))
+	{
+		m_ButtonInject.EnableWindow(false);
+		m_ButtonUnInject.EnableWindow(true);
+	}
+	else
+	{
+		m_ButtonInject.EnableWindow(true);
+		m_ButtonUnInject.EnableWindow(false);
+	}
+}
+
+
+// 辅助函数：根据进程 ID 和 DLL 名称获取模块基址（HMODULE）
+HMODULE GetRemoteModuleHandle(DWORD dwProcessId, const TCHAR* szModuleName)
+{
+	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, dwProcessId);
+	if (hSnapshot == INVALID_HANDLE_VALUE)
+		return nullptr;
+
+	MODULEENTRY32 me = { sizeof(MODULEENTRY32) };
+	HMODULE hModule = nullptr;
+
+	if (Module32First(hSnapshot, &me)) {
+		do {
+			if (_tcsicmp(me.szModule, szModuleName) == 0) {
+				hModule = me.hModule;
+				break;
+			}
+		} while (Module32Next(hSnapshot, &me));
+	}
+
+	CloseHandle(hSnapshot);
+	return hModule;
+}
+
+// 卸载 DLL 函数
+BOOL UninjectDll(DWORD dwProcessId, const TCHAR* szDllName)
+{
+	// 1. 打开目标进程
+	HANDLE hProcess = OpenProcess(
+		PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_CREATE_THREAD,
+		FALSE,
+		dwProcessId
+	);
+	if (!hProcess) {
+		_tprintf(_T("OpenProcess failed: %lu\n"), GetLastError());
+		return FALSE;
+	}
+
+	// 2. 获取 DLL 在目标进程中的模块句柄
+	HMODULE hMod = GetRemoteModuleHandle(dwProcessId, szDllName);
+	if (!hMod) {
+		_tprintf(_T("DLL not found in target process.\n"));
+		CloseHandle(hProcess);
+		return FALSE;
+	}
+
+	// 3. 获取 kernel32.dll 中 FreeLibrary 的地址
+	HMODULE hKernel32 = GetModuleHandle(_T("kernel32.dll"));
+	FARPROC pFreeLibrary = GetProcAddress(hKernel32, "FreeLibrary");
+	if (!pFreeLibrary) {
+		_tprintf(_T("GetProcAddress(FreeLibrary) failed.\n"));
+		CloseHandle(hProcess);
+		return FALSE;
+	}
+
+	// 4. 在目标进程中创建远程线程，调用 FreeLibrary(hMod)
+	HANDLE hThread = CreateRemoteThread(
+		hProcess,
+		nullptr,
+		0,
+		(LPTHREAD_START_ROUTINE)pFreeLibrary,
+		hMod,  // 参数：要卸载的模块句柄
+		0,
+		nullptr
+	);
+
+	if (!hThread) {
+		_tprintf(_T("CreateRemoteThread failed: %lu\n"), GetLastError());
+		CloseHandle(hProcess);
+		return FALSE;
+	}
+
+	// 5. 等待线程结束（可选，但推荐）
+	WaitForSingleObject(hThread, INFINITE);
+
+	DWORD exitCode = 0;
+	GetExitCodeThread(hThread, &exitCode);
+	BOOL success = (exitCode != 0); // FreeLibrary 返回非零表示成功
+
+	// 6. 清理
+	CloseHandle(hThread);
+	CloseHandle(hProcess);
+
+	if (success) {
+		_tprintf(_T("Successfully unloaded %s from PID %lu\n"), szDllName, dwProcessId);
+	}
+	else {
+		_tprintf(_T("FreeLibrary failed in target process (exit code: %lu)\n"), exitCode);
+	}
+
+	return success;
+}
+
+void CProcessGuardianDlg::OnBnClickedUninjectBtn()
+{
+	int idx = m_ComboProcess.GetCurSel();
+	if (idx == CB_ERR) return;
+
+	auto pid = m_ComboProcess.GetItemData(idx);
+
+	if (UninjectDll(pid, _T("HookDll.dll")))
+	{
+		m_ButtonInject.EnableWindow(true);
+		m_ButtonUnInject.EnableWindow(false);
+	}
+	else
+	{
+		m_ButtonInject.EnableWindow(false);
+		m_ButtonUnInject.EnableWindow(true);
+	}
+}
+
+void CProcessGuardianDlg::OnBnClickedRefreshProcessBtn()
+{
+	// 填充进程列表
+	PopulateProcessList();
+}
+
+BOOL CProcessGuardianDlg::OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct)
+{
+	if (!pCopyDataStruct) return FALSE;
+
+	// 我们约定：dwData = 0x1234 表示日志消息
+	if (pCopyDataStruct->dwData == LOG_COPYDATA_ID && pCopyDataStruct->cbData > 0) {
+		// 数据是 UTF-8 JSON 字符串（推荐）
+		const char* pszJson = (const char*)pCopyDataStruct->lpData;
+		if (pszJson) {
+			// 转为 CString（自动处理 ANSI/Unicode）
+			CString strJson = CA2T(pszJson, CP_UTF8);
+			ParseAndAddLogToList(strJson); // 复用你已有的解析函数
+		}
+	}
+
+	return TRUE; // 表示已处理
 }

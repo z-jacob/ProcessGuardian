@@ -6,6 +6,13 @@
 #include "detours/detours.h"
 #include <mutex>
 #pragma comment(lib, "detours//detours_x86.lib")
+
+
+#define MAIN_WINDOW_TITLE L"ProcessGuardian_Window_Unique_2026"
+#define LOG_COPYDATA_ID 0x1234
+
+
+
 // 原函数指针
 static BOOL(WINAPI* Real_ReadProcessMemory)(
 	HANDLE hProcess,
@@ -21,35 +28,135 @@ static BOOL(WINAPI* Real_WriteProcessMemory)(
 	SIZE_T nSize,
 	SIZE_T* lpNumberOfBytesWritten) = WriteProcessMemory;
 
-// 命名管道句柄（每个线程独立，避免竞争）
-static thread_local HANDLE g_hPipe = INVALID_HANDLE_VALUE;
+// 全局配置：最大打印字节数（避免日志爆炸）
+static const SIZE_T g_maxDumpSize = 256; // 可设为 1024、4096 等
 
+// 将字节转为十六进制字符串，支持大块数据（带换行和截断）
+void BytesToHexFull(const void* data, size_t len, char* out, size_t outSize) {
+	if (!data || len == 0 || outSize < 1) {
+		*out = '\0';
+		return;
+	}
 
-// 全局互斥体（用于初始化时避免重复连接，其实 TLS 不需要，但保险起见）
-static std::mutex g_pipeMutex;
+	const unsigned char* bytes = (const unsigned char*)data;
+	char* p = out;
+	char* end = out + outSize - 1; // 留1字节给'\0'
 
+	for (size_t i = 0; i < len && p < end; ++i) {
+		int written = sprintf_s(p, end - p, "%02X ", bytes[i]);
+		if (written <= 0) break;
+		p += written;
+	}
 
-// 发送日志到主程序
-void SendLogToGui(const char* log) {
-	if (g_hPipe == INVALID_HANDLE_VALUE) {
-		// 尝试连接命名管道（仅当前线程首次调用时）
-		g_hPipe = CreateFileA(
-			"\\\\.\\pipe\\RWMHookPipe",
-			GENERIC_WRITE,
-			0, nullptr,
-			OPEN_EXISTING,
-			FILE_ATTRIBUTE_NORMAL,
-			nullptr
-		);
+	if (p > out) {
+		// 去掉最后一个空格
+		*(p - 1) = '\0';
+	}
+	else {
+		*out = '\0';
+	}
+}
 
-		if (g_hPipe == INVALID_HANDLE_VALUE) {
-			return; // 主程序未运行，静默丢弃
+void SendLogToGui(const char* jsonMessage) {
+	if (!jsonMessage) return;
+
+	// 1. 查找主程序窗口
+	HWND hWnd = FindWindowW(NULL, MAIN_WINDOW_TITLE);
+	if (!hWnd) {
+		// 主程序未运行，静默丢弃
+		return;
+	}
+
+	// 2. 准备 COPYDATASTRUCT
+	size_t len = strlen(jsonMessage) + 1; // 包含 '\0'
+	if (len > 65536) return; // 防止过大（WM_COPYDATA 有大小限制）
+
+	COPYDATASTRUCT cds = { 0 };
+	cds.dwData = LOG_COPYDATA_ID;
+	cds.cbData = (DWORD)len;
+	cds.lpData = (void*)jsonMessage;
+
+	// 3. 发送（同步，会等待主程序处理完）
+	SendMessageW(hWnd, WM_COPYDATA, (WPARAM)nullptr, (LPARAM)&cds);
+}
+
+// 安全地将字符串追加到缓冲区（带长度检查）
+void AppendString(char*& p, char* end, const char* str) {
+	size_t len = strlen(str);
+	if (p + len >= end) return;
+	memcpy(p, str, len);
+	p += len;
+}
+
+// 构建 RPM/WPM 的 JSON 日志
+void BuildJsonLog(
+	bool isRead,
+	DWORD pid,
+	LPCVOID baseAddr,
+	SIZE_T requestSize,
+	SIZE_T actualSize,
+	BOOL success,
+	DWORD error,
+	const void* data,
+	SIZE_T dataSize,
+	char* outBuffer,
+	size_t bufferSize)
+{
+	char* p = outBuffer;
+	char* end = outBuffer + bufferSize - 1;
+
+	AppendString(p, end, "{");
+
+	// type
+	AppendString(p, end, isRead ? "\"type\":\"READ\"" : "\"type\":\"WRITE\"");
+	AppendString(p, end, ",\"pid\":");
+	char temp[32];
+	_snprintf_s(temp, sizeof(temp), "%u", pid);
+	AppendString(p, end, temp);
+
+	// 注意：sprintf 地址需用 %p，但要转成字符串
+	char addrStr[32];
+	_snprintf_s(addrStr, sizeof(addrStr), "0x%p", baseAddr);
+	// 替换上面的占位符
+	// 更简单：直接拼
+	AppendString(p, end, ",\"address\":\"");
+	AppendString(p, end, addrStr);
+	AppendString(p, end, "\"");
+
+	// sizes
+	_snprintf_s(temp, sizeof(temp), ",\"request_size\":%zu", requestSize);
+	AppendString(p, end, temp);
+	_snprintf_s(temp, sizeof(temp), ",\"actual_size\":%zu", actualSize);
+	AppendString(p, end, temp);
+
+	// result
+	AppendString(p, end, ",\"success\":");
+	AppendString(p, end, success ? "true" : "false");
+	if (!success) {
+		_snprintf_s(temp, sizeof(temp), ",\"error\":%u", error);
+		AppendString(p, end, temp);
+	}
+
+	// data (hex string, no quotes needed in hex, but wrap in "")
+	if (data && dataSize > 0) {
+		AppendString(p, end, ",\"data\":\"");
+		// 转 hex
+		const unsigned char* bytes = (const unsigned char*)data;
+		for (SIZE_T i = 0; i < dataSize && p + 4 < end; ++i) {
+			_snprintf_s(temp, sizeof(temp), "%02X ", bytes[i]);
+			AppendString(p, end, temp);
+		}
+		// 去掉末尾空格
+		if (p > outBuffer && *(p - 1) == ' ') {
+			*(p - 1) = '"';
+		}
+		else {
+			AppendString(p, end, "\"");
 		}
 	}
 
-	DWORD written;
-	// 写入日志（带换行，便于解析）
-	WriteFile(g_hPipe, log, (DWORD)strlen(log), &written, nullptr);
+	AppendString(p, end, "}\n");
+	*p = '\0';
 }
 
 
@@ -61,26 +168,31 @@ BOOL WINAPI Mine_ReadProcessMemory(
 	SIZE_T nSize,
 	SIZE_T* lpNumberOfBytesRead)
 {
-	char buffer[512];
 	DWORD pid = GetProcessId(hProcess);
-	snprintf(buffer, sizeof(buffer),
-		"[READ] PID=%u | Base=0x%p | Buf=0x%p | Size=0x%zX (%zu)\n",
-		pid, lpBaseAddress, lpBuffer, nSize, nSize);
-
-	SendLogToGui(buffer);
-
-	// 调用原始函数
 	BOOL result = Real_ReadProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesRead);
 
-	if (!result) {
-		snprintf(buffer, sizeof(buffer), "  -> FAILED! Error=%u\n", GetLastError());
-		SendLogToGui(buffer);
-	}
-	else if (lpNumberOfBytesRead) {
-		snprintf(buffer, sizeof(buffer), "  -> OK, read %zu bytes\n", *lpNumberOfBytesRead);
-		SendLogToGui(buffer);
-	}
+	SIZE_T actualRead = lpNumberOfBytesRead ? *lpNumberOfBytesRead : (result ? nSize : 0);
+	DWORD error = result ? 0 : GetLastError();
 
+	char jsonBuf[4096];
+	// 最多 dump 64 字节（避免 JSON 过大）
+	SIZE_T dumpSize = min(actualRead, (SIZE_T)64);
+
+	BuildJsonLog(
+		true, // isRead
+		pid,
+		lpBaseAddress,
+		nSize,
+		actualRead,
+		result,
+		error,
+		result ? lpBuffer : nullptr,
+		dumpSize,
+		jsonBuf,
+		sizeof(jsonBuf)
+	);
+
+	SendLogToGui(jsonBuf);
 	return result;
 }
 
@@ -92,25 +204,33 @@ BOOL WINAPI Mine_WriteProcessMemory(
 	SIZE_T nSize,
 	SIZE_T* lpNumberOfBytesWritten)
 {
-	char buffer[512];
 	DWORD pid = GetProcessId(hProcess);
-	snprintf(buffer, sizeof(buffer),
-		"[WRITE] PID=%u | Base=0x%p | Buf=0x%p | Size=0x%zX (%zu)\n",
-		pid, lpBaseAddress, lpBuffer, nSize, nSize);
-
-	SendLogToGui(buffer);
-
+	SIZE_T actualWritten = 0;
 	BOOL result = Real_WriteProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesWritten);
 
-	if (!result) {
-		snprintf(buffer, sizeof(buffer), "  -> FAILED! Error=%u\n", GetLastError());
-		SendLogToGui(buffer);
+	if (result && lpNumberOfBytesWritten) {
+		actualWritten = *lpNumberOfBytesWritten;
 	}
-	else if (lpNumberOfBytesWritten) {
-		snprintf(buffer, sizeof(buffer), "  -> OK, wrote %zu bytes\n", *lpNumberOfBytesWritten);
-		SendLogToGui(buffer);
-	}
+	DWORD error = result ? 0 : GetLastError();
 
+	char jsonBuf[4096];
+	SIZE_T dumpSize = min(nSize, (SIZE_T)64); // 写入前数据已知
+
+	BuildJsonLog(
+		false, // isRead
+		pid,
+		lpBaseAddress,
+		nSize,
+		actualWritten,
+		result,
+		error,
+		lpBuffer,
+		dumpSize,
+		jsonBuf,
+		sizeof(jsonBuf)
+	);
+
+	SendLogToGui(jsonBuf);
 	return result;
 }
 
@@ -121,8 +241,6 @@ void InstallHooks() {
 	DetourAttach(&(PVOID&)Real_ReadProcessMemory, Mine_ReadProcessMemory);
 	DetourAttach(&(PVOID&)Real_WriteProcessMemory, Mine_WriteProcessMemory);
 	DetourTransactionCommit();
-
-	SendLogToGui("注入Dll成功！\n");
 }
 
 // 卸载 Hook
@@ -132,13 +250,6 @@ void UninstallHooks() {
 	DetourDetach(&(PVOID&)Real_ReadProcessMemory, Mine_ReadProcessMemory);
 	DetourDetach(&(PVOID&)Real_WriteProcessMemory, Mine_WriteProcessMemory);
 	DetourTransactionCommit();
-	SendLogToGui("卸载Dll成功！\n");
-
-
-	if (g_hPipe != INVALID_HANDLE_VALUE) {
-		CloseHandle(g_hPipe);
-		g_hPipe = INVALID_HANDLE_VALUE;
-	}
 }
 
 
@@ -154,20 +265,8 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 		break;
 	case DLL_PROCESS_DETACH:
 		UninstallHooks();
-		// 清理主线程的管道（其他线程已退出）
-		if (g_hPipe != INVALID_HANDLE_VALUE) {
-			FlushFileBuffers(g_hPipe); // 确保日志发出
-			CloseHandle(g_hPipe);
-			g_hPipe = INVALID_HANDLE_VALUE;
-		}
 		break;
 	case DLL_THREAD_DETACH:
-		// 可选：显式关闭当前线程的管道
-		if (g_hPipe != INVALID_HANDLE_VALUE) {
-			FlushFileBuffers(g_hPipe);
-			CloseHandle(g_hPipe);
-			g_hPipe = INVALID_HANDLE_VALUE;
-		}
 		break;
 	}
 	return TRUE;

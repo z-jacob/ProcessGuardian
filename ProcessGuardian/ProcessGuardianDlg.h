@@ -33,14 +33,17 @@ protected:
 	DECLARE_MESSAGE_MAP()
 
 protected:
-	CWinThread* m_pLogThread;
-	HANDLE m_hStopEvent;
 	CString m_strDllPath;
 	void PopulateProcessList();
-	LRESULT OnLogMessage(WPARAM wParam, LPARAM lParam);
+	void ParseAndAddLogToList(const CString& jsonStr);
 public:
-	static UINT LogListenerProc(LPVOID pParam);
 	afx_msg void OnBnClickedInjectBtn();
 	CComboBox m_ComboProcess;
-	CEdit m_EditLog;
+	CListCtrl m_ListLog;
+	CButton m_ButtonInject;
+	CButton m_ButtonUnInject;
+	afx_msg void OnBnClickedUninjectBtn();
+	afx_msg void OnBnClickedRefreshProcessBtn();
+
+	afx_msg BOOL OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct);
 };
