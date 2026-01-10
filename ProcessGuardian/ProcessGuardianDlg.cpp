@@ -200,47 +200,46 @@ LRESULT CProcessGuardianDlg::OnLogMessage(WPARAM wParam, LPARAM lParam)
 UINT CProcessGuardianDlg::LogListenerProc(LPVOID pParam)
 {
 	CProcessGuardianDlg* pThis = (CProcessGuardianDlg*)pParam;
-	HANDLE hPipe = CreateNamedPipe(
-		_T("\\\\.\\pipe\\RWMHookPipe"),
-		PIPE_ACCESS_INBOUND,
-		PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-		1, 1024, 1024, 0, NULL
-	);
 
-	if (hPipe == INVALID_HANDLE_VALUE) {
-		AfxMessageBox(_T("Failed to create named pipe!"));
-		return 1;
-	}
+	while (WaitForSingleObject(pThis->m_hStopEvent, 0) != WAIT_OBJECT_0) {
+		HANDLE hPipe = CreateNamedPipe(
+			_T("\\\\.\\pipe\\RWMHookPipe"),
+			PIPE_ACCESS_INBOUND,
+			PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+			1, 1024, 1024, 0, NULL
+		);
 
-	while (true) {
+		if (hPipe == INVALID_HANDLE_VALUE) {
+			Sleep(500);
+			continue;
+		}
+
 		// 等待客户端连接
 		if (!ConnectNamedPipe(hPipe, NULL)) {
 			if (GetLastError() != ERROR_PIPE_CONNECTED) {
-				break;
+				CloseHandle(hPipe);
+				Sleep(500);
+				continue;
 			}
 		}
 
+		// 客户端已连接，持续读取直到断开
 		char buffer[1024];
 		DWORD bytesRead;
-		while (ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+		while (ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL)) {
+			if (bytesRead == 0) break; // 客户端正常关闭
+
 			buffer[bytesRead] = '\0';
 			CStringA msgA(buffer);
-			CString msgW(msgA);
-
-			// 发消息到主线程更新 UI
-			CString* pNewStr = new CString(msgW);
-			pThis->PostMessage(WM_USER + 1, 0, (LPARAM)pNewStr);
-			msgW.ReleaseBuffer();
+			CString* pMsg = new CString(msgA);
+			pThis->PostMessage(WM_USER + 1, 0, (LPARAM)pMsg);
 		}
 
-		DisconnectNamedPipe(hPipe);
-
-		// 检查是否要退出
-		if (WaitForSingleObject(pThis->m_hStopEvent, 0) == WAIT_OBJECT_0)
-			break;
+		// 客户端断开（可能因进程退出、DLL 卸载等）
+		CloseHandle(hPipe);
+		// 自动进入下一轮循环，等待新连接
 	}
 
-	CloseHandle(hPipe);
 	return 0;
 }
 
