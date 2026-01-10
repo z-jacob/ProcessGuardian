@@ -19,6 +19,7 @@
 // ProcessGuardianDlg.h
 
 #define MAIN_WINDOW_TITLE _T("ProcessGuardian_Window_Unique_2026")
+
 #define LOG_COPYDATA_ID 0x1234
 
 // 用于应用程序“关于”菜单项的 CAboutDlg 对话框
@@ -70,7 +71,6 @@ void CProcessGuardianDlg::DoDataExchange(CDataExchange* pDX)
 	DDX_Control(pDX, IDC_PROC_COMBO, m_ComboProcess);
 	DDX_Control(pDX, IDC_LIST_LOG, m_ListLog);
 	DDX_Control(pDX, IDC_INJECT_BTN, m_ButtonInject);
-	DDX_Control(pDX, IDC_UNINJECT_BTN, m_ButtonUnInject);
 	DDX_Control(pDX, IDC_EDIT_LOG, m_EditLog);
 }
 
@@ -80,7 +80,6 @@ BEGIN_MESSAGE_MAP(CProcessGuardianDlg, CDialog)
 	ON_WM_PAINT()
 	ON_WM_QUERYDRAGICON()
 	ON_BN_CLICKED(IDC_INJECT_BTN, &CProcessGuardianDlg::OnBnClickedInjectBtn)
-	ON_BN_CLICKED(IDC_UNINJECT_BTN, &CProcessGuardianDlg::OnBnClickedUninjectBtn)
 	ON_BN_CLICKED(IDC_REFRESH_PROCESS_BTN, &CProcessGuardianDlg::OnBnClickedRefreshProcessBtn)
 END_MESSAGE_MAP()
 
@@ -131,7 +130,7 @@ BOOL CProcessGuardianDlg::OnInitDialog()
 	m_ListLog.InsertColumn(0, _T("序号"), LVCFMT_RIGHT, 80);   // 新增
 	m_ListLog.InsertColumn(1, _T("类型"), LVCFMT_LEFT, 80);
 	m_ListLog.InsertColumn(2, _T("PID"), LVCFMT_RIGHT, 80);
-	m_ListLog.InsertColumn(3, _T("地址"), LVCFMT_LEFT, 120);
+	m_ListLog.InsertColumn(3, _T("地址"), LVCFMT_LEFT, 180);
 	m_ListLog.InsertColumn(4, _T("请求大小"), LVCFMT_RIGHT, 120);
 	m_ListLog.InsertColumn(5, _T("实际大小"), LVCFMT_RIGHT, 120);
 	m_ListLog.InsertColumn(6, _T("状态"), LVCFMT_LEFT, 80);
@@ -147,9 +146,6 @@ BOOL CProcessGuardianDlg::OnInitDialog()
 
 	// 填充进程列表
 	PopulateProcessList();
-
-	m_ButtonInject.EnableWindow(true);
-	m_ButtonUnInject.EnableWindow(false);
 
 
 	return TRUE;  // 除非将焦点设置到控件，否则返回 TRUE
@@ -302,128 +298,7 @@ void CProcessGuardianDlg::OnBnClickedInjectBtn()
 
 	auto pid = m_ComboProcess.GetItemData(idx);
 
-	if (InjectDLL(pid, m_strDllPath))
-	{
-		m_ButtonInject.EnableWindow(false);
-		m_ButtonUnInject.EnableWindow(true);
-	}
-	else
-	{
-		m_ButtonInject.EnableWindow(true);
-		m_ButtonUnInject.EnableWindow(false);
-	}
-}
-
-
-// 辅助函数：根据进程 ID 和 DLL 名称获取模块基址（HMODULE）
-HMODULE GetRemoteModuleHandle(DWORD dwProcessId, const TCHAR* szModuleName)
-{
-	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, dwProcessId);
-	if (hSnapshot == INVALID_HANDLE_VALUE)
-		return nullptr;
-
-	MODULEENTRY32 me = { sizeof(MODULEENTRY32) };
-	HMODULE hModule = nullptr;
-
-	if (Module32First(hSnapshot, &me)) {
-		do {
-			if (_tcsicmp(me.szModule, szModuleName) == 0) {
-				hModule = me.hModule;
-				break;
-			}
-		} while (Module32Next(hSnapshot, &me));
-	}
-
-	CloseHandle(hSnapshot);
-	return hModule;
-}
-
-// 卸载 DLL 函数
-BOOL UninjectDll(DWORD dwProcessId, const TCHAR* szDllName)
-{
-	// 1. 打开目标进程
-	HANDLE hProcess = OpenProcess(
-		PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_CREATE_THREAD,
-		FALSE,
-		dwProcessId
-	);
-	if (!hProcess) {
-		_tprintf(_T("OpenProcess failed: %lu\n"), GetLastError());
-		return FALSE;
-	}
-
-	// 2. 获取 DLL 在目标进程中的模块句柄
-	HMODULE hMod = GetRemoteModuleHandle(dwProcessId, szDllName);
-	if (!hMod) {
-		_tprintf(_T("DLL not found in target process.\n"));
-		CloseHandle(hProcess);
-		return FALSE;
-	}
-
-	// 3. 获取 kernel32.dll 中 FreeLibrary 的地址
-	HMODULE hKernel32 = GetModuleHandle(_T("kernel32.dll"));
-	FARPROC pFreeLibrary = GetProcAddress(hKernel32, "FreeLibrary");
-	if (!pFreeLibrary) {
-		_tprintf(_T("GetProcAddress(FreeLibrary) failed.\n"));
-		CloseHandle(hProcess);
-		return FALSE;
-	}
-
-	// 4. 在目标进程中创建远程线程，调用 FreeLibrary(hMod)
-	HANDLE hThread = CreateRemoteThread(
-		hProcess,
-		nullptr,
-		0,
-		(LPTHREAD_START_ROUTINE)pFreeLibrary,
-		hMod,  // 参数：要卸载的模块句柄
-		0,
-		nullptr
-	);
-
-	if (!hThread) {
-		_tprintf(_T("CreateRemoteThread failed: %lu\n"), GetLastError());
-		CloseHandle(hProcess);
-		return FALSE;
-	}
-
-	// 5. 等待线程结束（可选，但推荐）
-	WaitForSingleObject(hThread, INFINITE);
-
-	DWORD exitCode = 0;
-	GetExitCodeThread(hThread, &exitCode);
-	BOOL success = (exitCode != 0); // FreeLibrary 返回非零表示成功
-
-	// 6. 清理
-	CloseHandle(hThread);
-	CloseHandle(hProcess);
-
-	if (success) {
-		_tprintf(_T("Successfully unloaded %s from PID %lu\n"), szDllName, dwProcessId);
-	}
-	else {
-		_tprintf(_T("FreeLibrary failed in target process (exit code: %lu)\n"), exitCode);
-	}
-
-	return success;
-}
-
-void CProcessGuardianDlg::OnBnClickedUninjectBtn()
-{
-	int idx = m_ComboProcess.GetCurSel();
-	if (idx == CB_ERR) return;
-
-	auto pid = m_ComboProcess.GetItemData(idx);
-
-	if (UninjectDll(pid, _T("HookDll.dll")))
-	{
-		m_ButtonInject.EnableWindow(true);
-		m_ButtonUnInject.EnableWindow(false);
-	}
-	else
-	{
-		m_ButtonInject.EnableWindow(false);
-		m_ButtonUnInject.EnableWindow(true);
-	}
+	InjectDLL(pid, m_strDllPath);
 }
 
 void CProcessGuardianDlg::OnBnClickedRefreshProcessBtn()
@@ -446,6 +321,5 @@ BOOL CProcessGuardianDlg::OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct
 			ParseAndAddLogToList(strJson); // 复用你已有的解析函数
 		}
 	}
-
 	return TRUE; // 表示已处理
 }

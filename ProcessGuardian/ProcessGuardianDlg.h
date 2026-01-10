@@ -41,9 +41,8 @@ public:
 	CComboBox m_ComboProcess;
 	CListCtrl m_ListLog;
 	CButton m_ButtonInject;
-	CButton m_ButtonUnInject;
-	afx_msg void OnBnClickedUninjectBtn();
 	afx_msg void OnBnClickedRefreshProcessBtn();
 
 	afx_msg BOOL OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct);
+	CEdit m_EditLog;
 };

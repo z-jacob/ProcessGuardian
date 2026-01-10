@@ -9,9 +9,8 @@
 
 
 #define MAIN_WINDOW_TITLE L"ProcessGuardian_Window_Unique_2026"
+
 #define LOG_COPYDATA_ID 0x1234
-
-
 
 // 原函数指针
 static BOOL(WINAPI* Real_ReadProcessMemory)(
