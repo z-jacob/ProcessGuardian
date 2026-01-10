@@ -30,12 +30,24 @@
     <ClInclude Include="detours\syelog.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="JSON\cJSON.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="JSON\CJsonObject.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="pch.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="JSON\cJSON.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="JSON\CJsonObject.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

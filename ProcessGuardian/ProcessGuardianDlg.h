@@ -38,6 +38,7 @@ protected:
 	void PopulateProcessList();
 	void ParseAndAddLogToList(const CString& jsonStr);
 	void ToggleHookInProcess(DWORD pid, bool enable);
+	FARPROC GetRemoteProcAddress(HMODULE hRemoteMod, const char* funcName);
 public:
 	afx_msg void OnBnClickedInjectBtn();
 	CComboBox m_ComboProcess;

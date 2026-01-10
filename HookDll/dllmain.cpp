@@ -4,7 +4,8 @@
 #include <string>
 #include <cstdio>
 #include "detours/detours.h"
-#include <mutex>
+#include "JSON/CJsonObject.hpp"
+
 #pragma comment(lib, "detours//detours_x86.lib")
 
 
@@ -88,74 +89,50 @@ void AppendString(char*& p, char* end, const char* str) {
 }
 
 // 构建 RPM/WPM 的 JSON 日志
-void BuildJsonLog(
+std::string BuildJsonLog(
 	bool isRead,
-	DWORD pid,
+	int pid,
 	LPCVOID baseAddr,
-	SIZE_T requestSize,
-	SIZE_T actualSize,
+	int requestSize,
+	int actualSize,
 	BOOL success,
-	DWORD error,
+	int error,
 	const void* data,
-	SIZE_T dataSize,
-	char* outBuffer,
-	size_t bufferSize)
+	int dataSize)
 {
-	char* p = outBuffer;
-	char* end = outBuffer + bufferSize - 1;
 
-	AppendString(p, end, "{");
+	neb::CJsonObject json;
 
-	// type
-	AppendString(p, end, isRead ? "\"type\":\"READ\"" : "\"type\":\"WRITE\"");
-	AppendString(p, end, ",\"pid\":");
-	char temp[32];
-	_snprintf_s(temp, sizeof(temp), "%u", pid);
-	AppendString(p, end, temp);
+	json.Add("type", isRead ? "READ" : "WRITE");
+	json.Add("pid", pid);
+
 
 	// 注意：sprintf 地址需用 %p，但要转成字符串
 	char addrStr[32];
 	_snprintf_s(addrStr, sizeof(addrStr), "0x%p", baseAddr);
-	// 替换上面的占位符
-	// 更简单：直接拼
-	AppendString(p, end, ",\"address\":\"");
-	AppendString(p, end, addrStr);
-	AppendString(p, end, "\"");
+	json.Add("address", addrStr);
 
-	// sizes
-	_snprintf_s(temp, sizeof(temp), ",\"request_size\":%zu", requestSize);
-	AppendString(p, end, temp);
-	_snprintf_s(temp, sizeof(temp), ",\"actual_size\":%zu", actualSize);
-	AppendString(p, end, temp);
 
-	// result
-	AppendString(p, end, ",\"success\":");
-	AppendString(p, end, success ? "true" : "false");
-	if (!success) {
-		_snprintf_s(temp, sizeof(temp), ",\"error\":%u", error);
-		AppendString(p, end, temp);
-	}
+	json.Add("request_size", requestSize);
+	json.Add("actual_size", actualSize);
+
+	json.Add("success", success);
+
 
 	// data (hex string, no quotes needed in hex, but wrap in "")
 	if (data && dataSize > 0) {
-		AppendString(p, end, ",\"data\":\"");
+		std::string dataStr = "";
 		// 转 hex
 		const unsigned char* bytes = (const unsigned char*)data;
-		for (SIZE_T i = 0; i < dataSize && p + 4 < end; ++i) {
+		for (int i = 0; i < dataSize; ++i) {
+			char temp[10] = { 0 };
 			_snprintf_s(temp, sizeof(temp), "%02X ", bytes[i]);
-			AppendString(p, end, temp);
+			dataStr += temp;
 		}
-		// 去掉末尾空格
-		if (p > outBuffer && *(p - 1) == ' ') {
-			*(p - 1) = '"';
-		}
-		else {
-			AppendString(p, end, "\"");
-		}
+		json.Add("data", dataStr);
 	}
 
-	AppendString(p, end, "}\n");
-	*p = '\0';
+	return json.ToString();
 }
 
 
@@ -173,11 +150,7 @@ BOOL WINAPI Mine_ReadProcessMemory(
 	SIZE_T actualRead = lpNumberOfBytesRead ? *lpNumberOfBytesRead : (result ? nSize : 0);
 	DWORD error = result ? 0 : GetLastError();
 
-	char jsonBuf[4096];
-	// 最多 dump 64 字节（避免 JSON 过大）
-	SIZE_T dumpSize = min(actualRead, (SIZE_T)64);
-
-	BuildJsonLog(
+	auto jsonBuf =  BuildJsonLog(
 		true, // isRead
 		pid,
 		lpBaseAddress,
@@ -186,12 +159,10 @@ BOOL WINAPI Mine_ReadProcessMemory(
 		result,
 		error,
 		result ? lpBuffer : nullptr,
-		dumpSize,
-		jsonBuf,
-		sizeof(jsonBuf)
+		actualRead
 	);
 
-	SendLogToGui(jsonBuf);
+	SendLogToGui(jsonBuf.c_str());
 	return result;
 }
 
@@ -212,10 +183,7 @@ BOOL WINAPI Mine_WriteProcessMemory(
 	}
 	DWORD error = result ? 0 : GetLastError();
 
-	char jsonBuf[4096];
-	SIZE_T dumpSize = min(nSize, (SIZE_T)64); // 写入前数据已知
-
-	BuildJsonLog(
+	auto jsonBuf = BuildJsonLog(
 		false, // isRead
 		pid,
 		lpBaseAddress,
@@ -224,12 +192,10 @@ BOOL WINAPI Mine_WriteProcessMemory(
 		result,
 		error,
 		lpBuffer,
-		dumpSize,
-		jsonBuf,
-		sizeof(jsonBuf)
+		nSize
 	);
 
-	SendLogToGui(jsonBuf);
+	SendLogToGui(jsonBuf.c_str());
 	return result;
 }
 

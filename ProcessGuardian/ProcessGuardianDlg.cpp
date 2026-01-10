@@ -22,6 +22,8 @@
 
 #define LOG_COPYDATA_ID 0x1234
 
+#define HOOK_DLL_NAME L"HookDll.dll"
+
 // 用于应用程序“关于”菜单项的 CAboutDlg 对话框
 
 class CAboutDlg : public CDialog
@@ -143,8 +145,14 @@ BOOL CProcessGuardianDlg::OnInitDialog()
 	TCHAR szPath[MAX_PATH];
 	GetModuleFileName(NULL, szPath, MAX_PATH);
 	PathRemoveFileSpec(szPath);
-	PathAppend(szPath, _T("HookDll.dll"));
+	PathAppend(szPath, HOOK_DLL_NAME);
 	m_strDllPath = szPath;
+
+	m_hLocalDll = LoadLibrary(szPath);
+	if (!m_hLocalDll) {
+		AfxMessageBox(_T("无法加载 HookDll.dll！请确保它在程序目录下。"));
+		// 可选：ExitProcess(1);
+	}
 
 	// 填充进程列表
 	PopulateProcessList();
@@ -271,26 +279,6 @@ void CProcessGuardianDlg::ParseAndAddLogToList(const CString& jsonStr)
 	}
 }
 
-
-// 辅助函数：获取远程 DLL 中导出函数的地址
-FARPROC GetRemoteProcAddress(HANDLE hProcess, HMODULE hRemoteMod, const char* funcName)
-{
-	// 1. 获取本地 DLL 句柄（用于解析导出表）
-	HMODULE hLocalMod = GetModuleHandle(L"HookDll.dll"); // ← 替换为你的 DLL 名
-	if (!hLocalMod) return nullptr;
-
-	// 2. 获取本地函数地址
-	FARPROC pLocalFunc = GetProcAddress(hLocalMod, funcName);
-	if (!pLocalFunc) return nullptr;
-
-	// 3. 计算 RVA = 本地地址 - 本地基址
-	ptrdiff_t rva = (BYTE*)pLocalFunc - (BYTE*)hLocalMod;
-
-	// 4. 远程地址 = 远程基址 + RVA
-	return (FARPROC)((BYTE*)hRemoteMod + rva);
-}
-
-
 // GetRemoteModuleHandle - 获取远程进程中指定模块的基址（HMODULE）
 // 参数：
 //   dwProcessId: 目标进程 PID
@@ -338,7 +326,7 @@ void CProcessGuardianDlg::ToggleHookInProcess(DWORD pid, bool enable)
 	}
 
 	// 获取远程 DLL 模块句柄
-	HMODULE hRemoteDll = GetRemoteModuleHandle(pid, L"HookDll.dll");
+	HMODULE hRemoteDll = GetRemoteModuleHandle(pid, HOOK_DLL_NAME);
 	if (!hRemoteDll) {
 		AfxMessageBox(_T("目标进程未加载 MyHook.dll！请先注入。"));
 		CloseHandle(hProcess);
@@ -347,7 +335,7 @@ void CProcessGuardianDlg::ToggleHookInProcess(DWORD pid, bool enable)
 
 	// 获取远程函数地址
 	const char* funcName = enable ? "EnableHooks" : "DisableHooks";
-	FARPROC pFunc = GetRemoteProcAddress(hProcess, hRemoteDll, funcName);
+	FARPROC pFunc = GetRemoteProcAddress(hRemoteDll, funcName);
 	if (!pFunc) {
 		AfxMessageBox(_T("找不到导出函数！"));
 		CloseHandle(hProcess);
@@ -364,7 +352,26 @@ void CProcessGuardianDlg::ToggleHookInProcess(DWORD pid, bool enable)
 	}
 
 	CloseHandle(hProcess);
-	AfxMessageBox(enable ? _T("Hook 已启用！") : _T("Hook 已禁用！"));
+	AfxMessageBox(enable ? _T("Hook成功！") : _T("UnHook成功！"));
+}
+
+FARPROC CProcessGuardianDlg::GetRemoteProcAddress(HMODULE hRemoteMod, const char* funcName)
+{
+	if (!m_hLocalDll) {
+		return nullptr; // 主程序未加载本地 DLL
+	}
+
+	// ✅ 使用 m_hLocalDll，而不是 GetModuleHandle!
+	FARPROC pLocalFunc = GetProcAddress(m_hLocalDll, funcName);
+	if (!pLocalFunc) {
+		return nullptr; // 函数名拼写错误或未导出
+	}
+
+	// 计算 RVA（相对虚拟地址）
+	ptrdiff_t rva = (BYTE*)pLocalFunc - (BYTE*)m_hLocalDll;
+
+	// 远程地址 = 远程基址 + RVA
+	return (FARPROC)((BYTE*)hRemoteMod + rva);
 }
 
 bool InjectDLL(DWORD pid, const CString& dllPath) {
