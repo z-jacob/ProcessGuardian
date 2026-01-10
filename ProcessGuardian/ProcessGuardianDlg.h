@@ -34,15 +34,20 @@ protected:
 
 protected:
 	CString m_strDllPath;
+	HMODULE m_hLocalDll; // 成员变量
 	void PopulateProcessList();
 	void ParseAndAddLogToList(const CString& jsonStr);
+	void ToggleHookInProcess(DWORD pid, bool enable);
 public:
 	afx_msg void OnBnClickedInjectBtn();
 	CComboBox m_ComboProcess;
 	CListCtrl m_ListLog;
 	CButton m_ButtonInject;
+
 	afx_msg void OnBnClickedRefreshProcessBtn();
 
 	afx_msg BOOL OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct);
 	CEdit m_EditLog;
+	afx_msg void OnBnClickedHookBtn();
+	afx_msg void OnBnClickedUnhookBtn();
 };

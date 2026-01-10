@@ -81,6 +81,8 @@ BEGIN_MESSAGE_MAP(CProcessGuardianDlg, CDialog)
 	ON_WM_QUERYDRAGICON()
 	ON_BN_CLICKED(IDC_INJECT_BTN, &CProcessGuardianDlg::OnBnClickedInjectBtn)
 	ON_BN_CLICKED(IDC_REFRESH_PROCESS_BTN, &CProcessGuardianDlg::OnBnClickedRefreshProcessBtn)
+	ON_BN_CLICKED(IDC_HOOK_BTN, &CProcessGuardianDlg::OnBnClickedHookBtn)
+	ON_BN_CLICKED(IDC_UNHOOK_BTN, &CProcessGuardianDlg::OnBnClickedUnhookBtn)
 END_MESSAGE_MAP()
 
 
@@ -269,6 +271,102 @@ void CProcessGuardianDlg::ParseAndAddLogToList(const CString& jsonStr)
 	}
 }
 
+
+// 辅助函数：获取远程 DLL 中导出函数的地址
+FARPROC GetRemoteProcAddress(HANDLE hProcess, HMODULE hRemoteMod, const char* funcName)
+{
+	// 1. 获取本地 DLL 句柄（用于解析导出表）
+	HMODULE hLocalMod = GetModuleHandle(L"HookDll.dll"); // ← 替换为你的 DLL 名
+	if (!hLocalMod) return nullptr;
+
+	// 2. 获取本地函数地址
+	FARPROC pLocalFunc = GetProcAddress(hLocalMod, funcName);
+	if (!pLocalFunc) return nullptr;
+
+	// 3. 计算 RVA = 本地地址 - 本地基址
+	ptrdiff_t rva = (BYTE*)pLocalFunc - (BYTE*)hLocalMod;
+
+	// 4. 远程地址 = 远程基址 + RVA
+	return (FARPROC)((BYTE*)hRemoteMod + rva);
+}
+
+
+// GetRemoteModuleHandle - 获取远程进程中指定模块的基址（HMODULE）
+// 参数：
+//   dwProcessId: 目标进程 PID
+//   szModuleName: 要查找的模块名（如 L"kernel32.dll" 或 L"MyHook.dll"）
+// 返回值：
+//   成功：模块基址（HMODULE）
+//   失败：nullptr
+HMODULE GetRemoteModuleHandle(DWORD dwProcessId, const wchar_t* szModuleName)
+{
+	if (!szModuleName) return nullptr;
+
+	HMODULE hModule = nullptr;
+	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, dwProcessId);
+	if (hSnapshot == INVALID_HANDLE_VALUE) {
+		return nullptr;
+	}
+
+	MODULEENTRY32W me = { 0 };
+	me.dwSize = sizeof(me);
+
+	if (Module32FirstW(hSnapshot, &me)) {
+		do {
+			// 比较模块名（不区分大小写）
+			if (_wcsicmp(me.szModule, szModuleName) == 0) {
+				hModule = me.hModule;
+				break;
+			}
+		} while (Module32NextW(hSnapshot, &me));
+	}
+
+	CloseHandle(hSnapshot);
+	return hModule;
+}
+
+
+void CProcessGuardianDlg::ToggleHookInProcess(DWORD pid, bool enable)
+{
+	HANDLE hProcess = OpenProcess(
+		PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION,
+		FALSE, pid
+	);
+	if (!hProcess) {
+		AfxMessageBox(_T("无法打开目标进程！"));
+		return;
+	}
+
+	// 获取远程 DLL 模块句柄
+	HMODULE hRemoteDll = GetRemoteModuleHandle(pid, L"HookDll.dll");
+	if (!hRemoteDll) {
+		AfxMessageBox(_T("目标进程未加载 MyHook.dll！请先注入。"));
+		CloseHandle(hProcess);
+		return;
+	}
+
+	// 获取远程函数地址
+	const char* funcName = enable ? "EnableHooks" : "DisableHooks";
+	FARPROC pFunc = GetRemoteProcAddress(hProcess, hRemoteDll, funcName);
+	if (!pFunc) {
+		AfxMessageBox(_T("找不到导出函数！"));
+		CloseHandle(hProcess);
+		return;
+	}
+
+	// 创建远程线程调用
+	HANDLE hThread = CreateRemoteThread(hProcess, nullptr, 0,
+		(LPTHREAD_START_ROUTINE)pFunc, nullptr, 0, nullptr);
+
+	if (hThread) {
+		WaitForSingleObject(hThread, 2000); // 等待最多2秒
+		CloseHandle(hThread);
+	}
+
+	CloseHandle(hProcess);
+	AfxMessageBox(enable ? _T("Hook 已启用！") : _T("Hook 已禁用！"));
+}
+
 bool InjectDLL(DWORD pid, const CString& dllPath) {
 	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
 	if (!hProcess) return false;
@@ -322,4 +420,24 @@ BOOL CProcessGuardianDlg::OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct
 		}
 	}
 	return TRUE; // 表示已处理
+}
+
+void CProcessGuardianDlg::OnBnClickedHookBtn()
+{
+	int idx = m_ComboProcess.GetCurSel();
+	if (idx == CB_ERR) return;
+
+	auto pid = m_ComboProcess.GetItemData(idx);
+
+	ToggleHookInProcess(pid,true);
+}
+
+void CProcessGuardianDlg::OnBnClickedUnhookBtn()
+{
+	int idx = m_ComboProcess.GetCurSel();
+	if (idx == CB_ERR) return;
+
+	auto pid = m_ComboProcess.GetItemData(idx);
+
+	ToggleHookInProcess(pid, false);
 }

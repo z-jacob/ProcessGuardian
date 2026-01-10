@@ -251,6 +251,26 @@ void UninstallHooks() {
 	DetourTransactionCommit();
 }
 
+// 👇 新增：全局标志，控制是否记录日志（可选）
+static volatile bool g_bHooksEnabled = false;
+
+// 👇 导出函数：启用 Hook（实际是重新安装）
+extern "C" __declspec(dllexport) void EnableHooks()
+{
+	if (g_bHooksEnabled) return;
+	g_bHooksEnabled = true;
+	InstallHooks();
+}
+
+// 👇 导出函数：禁用 Hook（卸载）
+extern "C" __declspec(dllexport) void DisableHooks()
+{
+	if (!g_bHooksEnabled) return;
+
+	g_bHooksEnabled = false;
+	UninstallHooks();
+}
+
 
 BOOL APIENTRY DllMain(HMODULE hModule,
 	DWORD  ul_reason_for_call,
@@ -260,7 +280,6 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 	switch (ul_reason_for_call) {
 	case DLL_PROCESS_ATTACH:
 		DisableThreadLibraryCalls(hModule);
-		InstallHooks();
 		break;
 	case DLL_PROCESS_DETACH:
 		UninstallHooks();
