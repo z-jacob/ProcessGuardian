@@ -48,7 +48,7 @@ public:
 	afx_msg void OnBnClickedRefreshProcessBtn();
 
 	afx_msg BOOL OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct);
-	CEdit m_EditLog;
 	afx_msg void OnBnClickedHookBtn();
 	afx_msg void OnBnClickedUnhookBtn();
+	afx_msg void OnBnClickedListClearBtn();
 };

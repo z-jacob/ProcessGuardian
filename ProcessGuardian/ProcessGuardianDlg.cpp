@@ -73,7 +73,6 @@ void CProcessGuardianDlg::DoDataExchange(CDataExchange* pDX)
 	DDX_Control(pDX, IDC_PROC_COMBO, m_ComboProcess);
 	DDX_Control(pDX, IDC_LIST_LOG, m_ListLog);
 	DDX_Control(pDX, IDC_INJECT_BTN, m_ButtonInject);
-	DDX_Control(pDX, IDC_EDIT_LOG, m_EditLog);
 }
 
 BEGIN_MESSAGE_MAP(CProcessGuardianDlg, CDialog)
@@ -85,6 +84,7 @@ BEGIN_MESSAGE_MAP(CProcessGuardianDlg, CDialog)
 	ON_BN_CLICKED(IDC_REFRESH_PROCESS_BTN, &CProcessGuardianDlg::OnBnClickedRefreshProcessBtn)
 	ON_BN_CLICKED(IDC_HOOK_BTN, &CProcessGuardianDlg::OnBnClickedHookBtn)
 	ON_BN_CLICKED(IDC_UNHOOK_BTN, &CProcessGuardianDlg::OnBnClickedUnhookBtn)
+	ON_BN_CLICKED(IDC_LIST_CLEAR_BTN, &CProcessGuardianDlg::OnBnClickedListClearBtn)
 END_MESSAGE_MAP()
 
 
@@ -447,4 +447,9 @@ void CProcessGuardianDlg::OnBnClickedUnhookBtn()
 	auto pid = m_ComboProcess.GetItemData(idx);
 
 	ToggleHookInProcess(pid, false);
+}
+
+void CProcessGuardianDlg::OnBnClickedListClearBtn()
+{
+	m_ListLog.DeleteAllItems();
 }

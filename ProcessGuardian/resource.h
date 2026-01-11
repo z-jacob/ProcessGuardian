@@ -14,7 +14,7 @@
 #define IDC_HOOK_BTN                    1004
 #define IDC_INJECT_BTN2                 1005
 #define IDC_REFRESH_PROCESS_BTN         1005
-#define IDC_EDIT_LOG                    1006
+#define IDC_LIST_CLEAR_BTN              1006
 #define IDC_UNHOOK_BTN                  1007
 
 // Next default values for new objects

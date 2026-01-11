@@ -116,7 +116,7 @@ std::string BuildJsonLog(
 	json.Add("request_size", requestSize);
 	json.Add("actual_size", actualSize);
 
-	json.Add("success", success);
+	json.Add("success", success, success);
 
 
 	// data (hex string, no quotes needed in hex, but wrap in "")
