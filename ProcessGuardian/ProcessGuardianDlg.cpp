@@ -132,11 +132,11 @@ BOOL CProcessGuardianDlg::OnInitDialog()
 
 	// 插入列（新增“序号”列）
 	m_ListLog.InsertColumn(0, _T("序号"), LVCFMT_RIGHT, 80);   // 新增
-	m_ListLog.InsertColumn(1, _T("类型"), LVCFMT_LEFT, 80);
+	m_ListLog.InsertColumn(1, _T("类型"), LVCFMT_LEFT, 150);
 	m_ListLog.InsertColumn(2, _T("PID"), LVCFMT_RIGHT, 80);
-	m_ListLog.InsertColumn(3, _T("地址"), LVCFMT_LEFT, 180);
-	m_ListLog.InsertColumn(4, _T("请求大小"), LVCFMT_RIGHT, 120);
-	m_ListLog.InsertColumn(5, _T("实际大小"), LVCFMT_RIGHT, 120);
+	m_ListLog.InsertColumn(3, _T("地址"), LVCFMT_LEFT, 120);
+	m_ListLog.InsertColumn(4, _T("请求大小"), LVCFMT_RIGHT, 100);
+	m_ListLog.InsertColumn(5, _T("实际大小"), LVCFMT_RIGHT, 100);
 	m_ListLog.InsertColumn(6, _T("状态"), LVCFMT_LEFT, 80);
 	m_ListLog.InsertColumn(7, _T("数据 (Hex)"), LVCFMT_LEFT, 500);
 

@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <string>
 #include <cstdio>
+#include <atomic>
 #include "detours/detours.h"
 #include "JSON/CJsonObject.hpp"
 
@@ -28,8 +29,18 @@ static BOOL(WINAPI* Real_WriteProcessMemory)(
 	SIZE_T nSize,
 	SIZE_T* lpNumberOfBytesWritten) = WriteProcessMemory;
 
-// 全局配置：最大打印字节数（避免日志爆炸）
-static const SIZE_T g_maxDumpSize = 256; // 可设为 1024、4096 等
+// 原子标志：是否启用 Hook
+static std::atomic<bool> g_bHooksEnabled{ false };
+
+std::string PtrToString(LPCVOID ptr) {
+	char buf[32] = { 0 };
+#ifdef _WIN64
+	_snprintf_s(buf, sizeof(buf), "0x%016llX", (unsigned long long)ptr);
+#else
+	_snprintf_s(buf, sizeof(buf), "0x%08X", (unsigned int)(uintptr_t)ptr);
+#endif
+	return std::string(buf);
+}
 
 // 将字节转为十六进制字符串，支持大块数据（带换行和截断）
 void BytesToHexFull(const void* data, size_t len, char* out, size_t outSize) {
@@ -57,86 +68,76 @@ void BytesToHexFull(const void* data, size_t len, char* out, size_t outSize) {
 	}
 }
 
+
 void SendLogToGui(const char* jsonMessage) {
 	if (!jsonMessage) return;
 
-	// 1. 查找主程序窗口
 	HWND hWnd = FindWindowW(NULL, MAIN_WINDOW_TITLE);
-	if (!hWnd) {
-		// 主程序未运行，静默丢弃
-		return;
-	}
+	if (!hWnd) return;
 
-	// 2. 准备 COPYDATASTRUCT
-	size_t len = strlen(jsonMessage) + 1; // 包含 '\0'
-	if (len > 65536) return; // 防止过大（WM_COPYDATA 有大小限制）
+	size_t len = strlen(jsonMessage) + 1;
+	if (len > 65535) return; // WM_COPYDATA 最大 64KB - 1
 
 	COPYDATASTRUCT cds = { 0 };
 	cds.dwData = LOG_COPYDATA_ID;
-	cds.cbData = (DWORD)len;
-	cds.lpData = (void*)jsonMessage;
+	cds.cbData = static_cast<DWORD>(len);
+	cds.lpData = const_cast<char*>(jsonMessage); // 安全：SendMessageW 是同步的
 
-	// 3. 发送（同步，会等待主程序处理完）
-	SendMessageW(hWnd, WM_COPYDATA, (WPARAM)nullptr, (LPARAM)&cds);
-}
-
-// 安全地将字符串追加到缓冲区（带长度检查）
-void AppendString(char*& p, char* end, const char* str) {
-	size_t len = strlen(str);
-	if (p + len >= end) return;
-	memcpy(p, str, len);
-	p += len;
+	SendMessageW(hWnd, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cds));
 }
 
 // 构建 RPM/WPM 的 JSON 日志
 std::string BuildJsonLog(
 	bool isRead,
-	int pid,
+	DWORD pid,
 	LPCVOID baseAddr,
-	int requestSize,
-	int actualSize,
+	SIZE_T requestSize,
+	SIZE_T actualSize,
 	BOOL success,
-	int error,
+	DWORD error,
 	const void* data,
-	int dataSize)
+	SIZE_T dataSize)
 {
-
 	neb::CJsonObject json;
+	json.Add("type", isRead ? "ReadProcessMemory" : "WriteProcessMemory");
+	json.Add("pid", (int)pid);
+	json.Add("address", PtrToString(baseAddr));
+	json.Add("request_size", (int)requestSize);
+	json.Add("actual_size", (int)actualSize);
+	json.Add("success", success != FALSE);
 
-	json.Add("type", isRead ? "READ" : "WRITE");
-	json.Add("pid", pid);
+	if (!success) {
+		json.Add("error_code", (int)error);
+	}
 
-
-	// 注意：sprintf 地址需用 %p，但要转成字符串
-	char addrStr[32];
-	_snprintf_s(addrStr, sizeof(addrStr), "0x%p", baseAddr);
-	json.Add("address", addrStr);
-
-
-	json.Add("request_size", requestSize);
-	json.Add("actual_size", actualSize);
-
-	json.Add("success", success, success);
-
-
-	// data (hex string, no quotes needed in hex, but wrap in "")
+	// 限制 data dump 大小
 	if (data && dataSize > 0) {
-		std::string dataStr = "";
-		// 转 hex
-		const unsigned char* bytes = (const unsigned char*)data;
-		for (int i = 0; i < dataSize; ++i) {
-			char temp[10] = { 0 };
-			_snprintf_s(temp, sizeof(temp), "%02X ", bytes[i]);
-			dataStr += temp;
+		SIZE_T dumpSize = dataSize;
+		std::string hexStr;
+		hexStr.reserve(dumpSize * 3);
+
+		const unsigned char* bytes = static_cast<const unsigned char*>(data);
+		for (SIZE_T i = 0; i < dumpSize; ++i) {
+			char byteStr[4];
+			_snprintf_s(byteStr, sizeof(byteStr), "%02X ", bytes[i]);
+			hexStr += byteStr;
 		}
-		json.Add("data", dataStr);
+		if (!hexStr.empty()) {
+			hexStr.pop_back(); // 移除末尾空格
+		}
+		json.Add("data", hexStr);
+
+		if (dumpSize < dataSize) {
+			json.Add("data_truncated", true);
+		}
 	}
 
 	return json.ToString();
 }
 
 
-// Hook 函数：ReadProcessMemory
+
+// Hook: ReadProcessMemory
 BOOL WINAPI Mine_ReadProcessMemory(
 	HANDLE hProcess,
 	LPCVOID lpBaseAddress,
@@ -146,12 +147,11 @@ BOOL WINAPI Mine_ReadProcessMemory(
 {
 	DWORD pid = GetProcessId(hProcess);
 	BOOL result = Real_ReadProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesRead);
-
 	SIZE_T actualRead = lpNumberOfBytesRead ? *lpNumberOfBytesRead : (result ? nSize : 0);
 	DWORD error = result ? 0 : GetLastError();
 
-	auto jsonBuf =  BuildJsonLog(
-		true, // isRead
+	auto jsonBuf = BuildJsonLog(
+		true,
 		pid,
 		lpBaseAddress,
 		nSize,
@@ -166,7 +166,7 @@ BOOL WINAPI Mine_ReadProcessMemory(
 	return result;
 }
 
-// Hook 函数：WriteProcessMemory
+// Hook: WriteProcessMemory
 BOOL WINAPI Mine_WriteProcessMemory(
 	HANDLE hProcess,
 	LPVOID lpBaseAddress,
@@ -175,16 +175,12 @@ BOOL WINAPI Mine_WriteProcessMemory(
 	SIZE_T* lpNumberOfBytesWritten)
 {
 	DWORD pid = GetProcessId(hProcess);
-	SIZE_T actualWritten = 0;
 	BOOL result = Real_WriteProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesWritten);
-
-	if (result && lpNumberOfBytesWritten) {
-		actualWritten = *lpNumberOfBytesWritten;
-	}
+	SIZE_T actualWritten = lpNumberOfBytesWritten ? *lpNumberOfBytesWritten : (result ? nSize : 0);
 	DWORD error = result ? 0 : GetLastError();
 
 	auto jsonBuf = BuildJsonLog(
-		false, // isRead
+		false,
 		pid,
 		lpBaseAddress,
 		nSize,
@@ -199,60 +195,43 @@ BOOL WINAPI Mine_WriteProcessMemory(
 	return result;
 }
 
-// 安装 Hook
 void InstallHooks() {
-	DetourTransactionBegin();
+	if (DetourTransactionBegin() != NO_ERROR) return;
 	DetourUpdateThread(GetCurrentThread());
 	DetourAttach(&(PVOID&)Real_ReadProcessMemory, Mine_ReadProcessMemory);
 	DetourAttach(&(PVOID&)Real_WriteProcessMemory, Mine_WriteProcessMemory);
 	DetourTransactionCommit();
 }
 
-// 卸载 Hook
 void UninstallHooks() {
-	DetourTransactionBegin();
+	if (DetourTransactionBegin() != NO_ERROR) return;
 	DetourUpdateThread(GetCurrentThread());
 	DetourDetach(&(PVOID&)Real_ReadProcessMemory, Mine_ReadProcessMemory);
 	DetourDetach(&(PVOID&)Real_WriteProcessMemory, Mine_WriteProcessMemory);
 	DetourTransactionCommit();
 }
 
-// 👇 新增：全局标志，控制是否记录日志（可选）
-static volatile bool g_bHooksEnabled = false;
-
-// 👇 导出函数：启用 Hook（实际是重新安装）
-extern "C" __declspec(dllexport) void EnableHooks()
-{
-	if (g_bHooksEnabled) return;
-	g_bHooksEnabled = true;
+extern "C" __declspec(dllexport) void EnableHooks() {
+	if (g_bHooksEnabled.exchange(true)) return; // 已启用
 	InstallHooks();
 }
 
-// 👇 导出函数：禁用 Hook（卸载）
-extern "C" __declspec(dllexport) void DisableHooks()
-{
-	if (!g_bHooksEnabled) return;
-
-	g_bHooksEnabled = false;
+extern "C" __declspec(dllexport) void DisableHooks() {
+	if (!g_bHooksEnabled.exchange(false)) return; // 未启用
 	UninstallHooks();
 }
 
-
-BOOL APIENTRY DllMain(HMODULE hModule,
-	DWORD  ul_reason_for_call,
-	LPVOID lpReserved
-)
-{
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
 	switch (ul_reason_for_call) {
 	case DLL_PROCESS_ATTACH:
 		DisableThreadLibraryCalls(hModule);
 		break;
 	case DLL_PROCESS_DETACH:
-		UninstallHooks();
-		break;
-	case DLL_THREAD_DETACH:
+		// 即使未启用，也尝试卸载（防御性）
+		if (g_bHooksEnabled.load()) {
+			UninstallHooks();
+		}
 		break;
 	}
 	return TRUE;
 }
-
