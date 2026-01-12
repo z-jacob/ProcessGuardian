@@ -104,7 +104,7 @@ std::string BuildJsonLog(
 	json.Add("address", PtrToString(baseAddr));
 	json.Add("request_size", (int)requestSize);
 	json.Add("actual_size", (int)actualSize);
-	json.Add("success", success != FALSE);
+	json.Add("success", success != FALSE, success != FALSE);
 
 	if (!success) {
 		json.Add("error_code", (int)error);
